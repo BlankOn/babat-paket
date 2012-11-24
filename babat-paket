@@ -1,0 +1,3 @@
+#!/bin/bash
+
+sudo ./babat-paket-nolocales && sudo ./babat-paket-nodocs

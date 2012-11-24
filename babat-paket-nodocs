@@ -1,0 +1,138 @@
+#!/bin/bash
+
+# Packages to strip
+PACKAGES="nama_package"
+
+# Debian mirror
+MIRROR=http://arsip-dev.blankonlinux.or.id/blankon-debian
+
+# Debian distribution
+DIST=rote
+
+# Debian components
+COMPONENTS="main"
+
+# Architectures covered
+ARCHS="i386 amd64"
+
+# Path to reprepro base directory
+REPREPRO=/home/xxx/reprepro-nodocs/
+
+# Work directory, make sure it is big enough to hold downloaded and extracted binaries
+TMP=/home/xxx/blankon-nodocs/
+
+###############################################################################################
+# No variable settings beyond this point
+###############################################################################################
+set -e
+APPEND=+nodocs
+
+mkdir -p $TMP
+rm -rf $TMP
+
+function setup_repository() {
+    echo "Setting up $1 repository..."
+    local ARCH=$1
+    ## setup repository
+    DIR=$TMP/A
+    mkdir -p $DIR
+    mkdir -p $DIR/lists/partial
+    mkdir -p $DIR/cache/archives/partial
+    
+    O=""
+    O+="-o Apt::Architecture=$ARCH "
+    O+="-o Dir::Cache=$DIR/cache "
+    O+="-o Dir::Cache::Archives=$DIR/cache/archives "
+    O+="-o Dir::State::Lists=$DIR/lists "
+    O+="-o Dir::Etc::SourceList=$DIR/sources.list "
+    
+    cat << @@EOF > $DIR/sources.list
+deb $MIRROR $DIST $COMPONENTS
+deb-src $MIRROR $DIST $COMPONENTS
+@@EOF
+    
+    apt-get $O update
+}
+
+function hijack_binary() {
+    echo -n "  - $1..."
+    local BINARY=$1
+    local VERSION=$2
+    local NEW_VERSION=$3
+    local DIR=$4
+    BASE_URL=$MIRROR/$DIR/
+
+    set +e
+    mkdir -p $TMP/$1/{data,control}
+    pushd $TMP/$1 > /dev/null
+    local ARCH=`apt-cache $O show $1 2>/dev/null |grep "Architecture: "|head -1|cut -f2 -d' '` 
+    if [ $? != 0 ];then
+        return
+    fi
+    NAME=`echo PPP_VVV_AAA.deb | sed -e "s/PPP/$1/g" -e "s/VVV/$VERSION/g" -e "s/AAA/$ARCH/g"`
+    wget -q $BASE_URL/$NAME
+    if [ ! -f $NAME ];then
+        echo " package is not available"
+        return
+    fi
+    ar x $NAME 
+    
+    pushd $TMP/$1/control > /dev/null
+    tar xzf ../control.tar.gz 2>/dev/null
+    if [ $? != 0 ];then
+        return
+    fi
+
+    sed -i -e "s/$VERSION/$NEW_VERSION/g" control
+    tar czf ../control.tar.gz .
+    popd > /dev/null # $TMP/$1/control
+
+    pushd $TMP/$1/data > /dev/null
+    tar xzf ../data.tar.gz
+    #
+    rm -rf usr/share/doc
+    find | xargs md5sum 2>/dev/null | sed -e 's| \./| |' > ../control/md5sums
+    tar czf ../data.tar.gz .
+    #
+    popd > /dev/null # $TMP/$1/data
+
+    rm -rf data control $NAME
+    NEW_NAME=`echo $NAME|sed -e "s/$VERSION/$NEW_VERSION/g"`
+    ar cr ../$NEW_NAME debian-binary control.tar.gz data.tar.gz 
+
+    popd > /dev/null # $TMP/$1
+    rm -rf $TMP/$1
+
+    echo
+    set -e
+}
+
+function hijack() {
+   local SOURCE=$1
+   echo "Hijacking $SOURCE... "
+   BINARIES=`apt-cache $O showsrc --no-all-versions $SOURCE|grep '^Binary: '|head -1|sed -e 's/Binary: //g' -e 's/, / /g'`
+   for i in $BINARIES;do
+       VERSION=`apt-cache $O policy $i|grep Candidate| sed -e 's/ //g' | cut -f2 -d':' |head -1`
+       echo $VERSION | grep \\$APPEND && exit 0
+       break
+   done
+   NEW_VERSION=$VERSION$APPEND
+   DIR=`apt-cache $O showsrc --no-all-versions $SOURCE |grep "Directory: "|head -1 | cut -f2 -d' '` 
+
+   for i in $BINARIES;do
+       hijack_binary $i $VERSION $NEW_VERSION $DIR
+   done
+}
+
+for A in $ARCHS;do
+   setup_repository $A
+   for P in $PACKAGES;do
+       hijack $P
+   done
+done
+A=`ls -1 $TMP/*.deb 2>/dev/null|wc -l`
+if [ $A != 0 ];then
+    reprepro -b $REPREPRO includedeb $DIST $TMP/*.deb
+fi
+rm -rf $TMP
+echo "Done"
